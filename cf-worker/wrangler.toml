@@ -1,0 +1,6 @@
+name = "multimovieapi-relay"
+main = "worker.js"
+compatibility_date = "2024-04-01"
+
+# No KV, D1, or R2 needed — pure fetch relay.
+# Deploy: npx wrangler deploy
