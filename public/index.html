@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stream Extractor</title>
+    <style>
+        body { font-family: sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; }
+        .form-group { margin-bottom: 1rem; }
+        label { display: block; margin-bottom: 0.5rem; }
+        input { padding: 0.5rem; width: 100%; box-sizing: border-box; }
+        button { padding: 0.5rem 1rem; background: #0070f3; color: white; border: none; cursor: pointer; }
+        button:hover { background: #0051a2; }
+        #results { margin-top: 2rem; }
+        .stream-item { padding: 1rem; border: 1px solid #ccc; margin-bottom: 0.5rem; border-radius: 4px; }
+        .stream-provider { font-weight: bold; }
+        .stream-url { word-break: break-all; color: #0070f3; }
+        .error { color: red; }
+    </style>
+</head>
+<body>
+    <h1>Stream Extractor</h1>
+    <div class="form-group">
+        <label for="tmdbId">TMDB ID</label>
+        <input type="text" id="tmdbId" value="61663" placeholder="e.g. 61663">
+    </div>
+    <div class="form-group">
+        <label for="season">Season</label>
+        <input type="number" id="season" value="1" placeholder="e.g. 1">
+    </div>
+    <div class="form-group">
+        <label for="episode">Episode</label>
+        <input type="number" id="episode" value="1" placeholder="e.g. 1">
+    </div>
+    <button onclick="getStreams()">Get Streams</button>
+
+    <div id="results"></div>
+
+    <script>
+        async function getStreams() {
+            const tmdbId = document.getElementById('tmdbId').value;
+            const season = document.getElementById('season').value;
+            const episode = document.getElementById('episode').value;
+            const resultsDiv = document.getElementById('results');
+            
+            resultsDiv.innerHTML = 'Loading...';
+
+            try {
+                // In production, this calls the relative API path.
+                // For local testing without `vercel dev`, you might need to run the API separately.
+                const response = await fetch(`/api/extract?tmdbId=${tmdbId}&season=${season}&episode=${episode}`);
+                const data = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(data.error || 'Failed to fetch streams');
+                }
+
+                if (data.streams.length === 0) {
+                    resultsDiv.innerHTML = '<p>No streams found.</p>';
+                    return;
+                }
+
+                resultsDiv.innerHTML = `<h3>Results for: ${data.meta.name}</h3>` + 
+                    data.streams.map(s => `
+                        <div class="stream-item">
+                            <div class="stream-provider">${s.provider}</div>
+                            <div class="stream-url"><a href="${s.url}" target="_blank">${s.url}</a></div>
+                        </div>
+                    `).join('');
+
+            } catch (error) {
+                resultsDiv.innerHTML = `<p class="error">Error: ${error.message}</p>`;
+            }
+        }
+    </script>
+</body>
+</html>
