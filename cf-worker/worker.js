@@ -1,24 +1,21 @@
 /**
- * Cloudflare Worker — upstream relay for streams.iqsmartgames.com
+ * Cloudflare Worker — upstream relay for iqsmartgames.com APIs
  *
- * Allowed upstream hosts (whitelist prevents open-proxy abuse):
+ * Whitelisted upstream hosts:
  *   - streams.iqsmartgames.com   (Step 1: slug API)
- *   - ssn.iqsmartgames.com       (Step 2: embed helper)
+ *   - ssn.iqsmartgames.com       (Step 2: embed helper / embedhelper.php)
  *
- * Usage from your Vercel function:
- *   GET  https://<worker>.workers.dev/relay?url=<encoded-upstream-url>
- *   POST https://<worker>.workers.dev/relay?url=<encoded-upstream-url>
- *        body + Content-Type are forwarded as-is.
+ * The Worker replaces all request headers with a realistic Chrome browser
+ * fingerprint. This is critical: forwarding the Node.js/Vercel headers
+ * triggers Cloudflare's "Just a moment..." bot challenge on ssn.iqsmartgames.com.
+ * Requests from a CF Worker to another CF-protected site travel within
+ * Cloudflare's network and bypass the JS challenge — but only when the
+ * headers look like a real browser.
  *
- * All original request headers sent by the caller are forwarded, so
- * extractor.js keeps full control over User-Agent, Referer, etc.
- *
- * Deploy:
- *   1. npx wrangler deploy  (from the cf-worker/ directory)
- *      — OR —
- *   1. Paste this file into https://workers.cloudflare.com/ > Quick Edit
- *   2. Save & Deploy
- *   3. Copy the *.workers.dev URL and set it as RELAY_URL in Vercel env vars.
+ * Routes:
+ *   GET  /relay?url=<encoded>              — forward GET with browser headers
+ *   POST /relay?url=<encoded>              — forward POST, body passed through
+ *   GET  /health                           — liveness check
  */
 
 const ALLOWED_HOSTS = new Set([
@@ -26,27 +23,57 @@ const ALLOWED_HOSTS = new Set([
   'ssn.iqsmartgames.com',
 ]);
 
-// Headers the browser / caller sends that CF Workers must not forward verbatim
-const HOP_BY_HOP = new Set([
+// These are stripped from the incoming request before relaying
+const STRIP_INCOMING = new Set([
   'host', 'cf-connecting-ip', 'cf-ipcountry', 'cf-ray', 'cf-visitor',
-  'x-forwarded-for', 'x-forwarded-proto', 'x-real-ip',
-  'connection', 'keep-alive', 'transfer-encoding', 'te',
-  'trailer', 'upgrade',
+  'cf-worker', 'x-forwarded-for', 'x-forwarded-proto', 'x-real-ip',
+  'connection', 'keep-alive', 'transfer-encoding', 'te', 'trailer', 'upgrade',
 ]);
+
+// Realistic Chrome 124 browser headers — used for ALL upstream requests.
+// The Worker owns the outbound fingerprint; callers send metadata via
+// custom x-relay-* headers instead (see extractor.js).
+const CHROME_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
+function browserHeaders(referer, origin, extraHeaders = {}) {
+  return {
+    'User-Agent': CHROME_UA,
+    'Accept': 'application/json, text/plain, */*',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Referer': referer,
+    'Origin': origin,
+    'Connection': 'keep-alive',
+    'sec-fetch-dest': 'empty',
+    'sec-fetch-mode': 'cors',
+    'sec-fetch-site': 'same-site',
+    'sec-ch-ua': '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+    'sec-ch-ua-mobile': '?0',
+    'sec-ch-ua-platform': '"Windows"',
+    'Cache-Control': 'no-cache',
+    'Pragma': 'no-cache',
+    ...extraHeaders,
+  };
+}
 
 export default {
   async fetch(request, env, ctx) {
     const incoming = new URL(request.url);
 
-    // ---------- CORS pre-flight ----------
+    // ── CORS pre-flight ──────────────────────────────────────────────────────
     if (request.method === 'OPTIONS') {
-      return new Response(null, {
-        status: 204,
-        headers: corsHeaders(),
+      return new Response(null, { status: 204, headers: corsHeaders() });
+    }
+
+    // ── Health check ─────────────────────────────────────────────────────────
+    if (incoming.pathname === '/health') {
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json', ...corsHeaders() },
       });
     }
 
-    // ---------- Only handle /relay ----------
+    // ── Only handle /relay ───────────────────────────────────────────────────
     if (incoming.pathname !== '/relay') {
       return new Response('Not found', { status: 404 });
     }
@@ -63,38 +90,50 @@ export default {
       return new Response('Invalid URL', { status: 400 });
     }
 
-    // ---------- Whitelist check ----------
+    // ── Whitelist check ───────────────────────────────────────────────────────
     if (!ALLOWED_HOSTS.has(targetUrl.hostname)) {
       return new Response(`Host not allowed: ${targetUrl.hostname}`, { status: 403 });
     }
 
-    // ---------- Forward headers (strip hop-by-hop + CF internals) ----------
-    const forwardHeaders = new Headers();
-    for (const [key, value] of request.headers.entries()) {
-      if (!HOP_BY_HOP.has(key.toLowerCase())) {
-        forwardHeaders.set(key, value);
-      }
-    }
+    // ── Build outbound headers ────────────────────────────────────────────────
+    // Callers can pass x-relay-referer and x-relay-origin to control the
+    // Referer/Origin values without exposing them in the URL.
+    const callerReferer = request.headers.get('x-relay-referer');
+    const callerOrigin  = request.headers.get('x-relay-origin');
+    const isPost        = request.method === 'POST';
 
-    // ---------- Proxy the request ----------
+    // Derive sensible defaults if caller didn't specify
+    const defaultOrigin  = `${targetUrl.protocol}//${targetUrl.host}`;
+    const defaultReferer = `${defaultOrigin}/`;
+
+    const outboundHeaders = browserHeaders(
+      callerReferer || defaultReferer,
+      callerOrigin  || defaultOrigin,
+      isPost ? {
+        'Content-Type': request.headers.get('content-type') || 'application/x-www-form-urlencoded; charset=UTF-8',
+        'X-Requested-With': 'XMLHttpRequest',
+        'sec-fetch-site': 'cross-site',  // POST to embedhelper is cross-site
+      } : {}
+    );
+
+    // ── Proxy the request ─────────────────────────────────────────────────────
     let upstream;
     try {
       upstream = await fetch(targetUrl.toString(), {
         method: request.method,
-        headers: forwardHeaders,
-        body: ['GET', 'HEAD'].includes(request.method) ? undefined : request.body,
+        headers: outboundHeaders,
+        body: isPost ? request.body : undefined,
         redirect: 'follow',
       });
     } catch (err) {
       return new Response(`Relay fetch failed: ${err.message}`, { status: 502 });
     }
 
-    // ---------- Return upstream response with CORS headers ----------
+    // ── Return upstream response ──────────────────────────────────────────────
     const responseHeaders = new Headers(upstream.headers);
     for (const [k, v] of Object.entries(corsHeaders())) {
       responseHeaders.set(k, v);
     }
-    // Remove CF-added headers that could confuse callers
     responseHeaders.delete('cf-cache-status');
     responseHeaders.delete('cf-ray');
 
