@@ -32,11 +32,13 @@ module.exports = async (req, res) => {
     }
 
     try {
+        const userAgent = req.headers['user-agent'];
+
         // Step 1: Get file slug from iqsmartgames API (no fallbacks, exact values passed)
-        const fileSlug = await getFileSlug(tmdbId, season, episode, isMovie ? 'movie' : 'series');
+        const fileSlug = await getFileSlug(tmdbId, season, episode, isMovie ? 'movie' : 'series', userAgent);
 
         // Step 2: Get embed data
-        const embedData = await getEmbedData(fileSlug);
+        const embedData = await getEmbedData(fileSlug, userAgent);
 
         // Step 3: Process embed data into stream list
         const streams = processEmbedData(embedData);
